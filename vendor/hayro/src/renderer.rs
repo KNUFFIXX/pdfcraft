@@ -259,10 +259,14 @@ fn average_premultiplied_rgba(
     let (sw, sh) = (f64::from(source.0), f64::from(source.1));
     let sx = sw / f64::from(target.0);
     let sy = sh / f64::from(target.1);
+    // PdfCraft patch (#1700), review: the far end of the last target box, `(t + 1) * (s / t)` in
+    // f64, can round a hair above the source dimension — 22 × (25 / 22) = 25.000000000000004 —
+    // so `ceil` takes the row or column just past the last one; that read returns `None` and
+    // drops the whole image to the nearest-picking fallback. Clamp both far ends to the source.
     for ty in 0..target.1 {
-        let (y0, y1) = (f64::from(ty) * sy, f64::from(ty + 1) * sy);
+        let (y0, y1) = (f64::from(ty) * sy, (f64::from(ty + 1) * sy).min(sh));
         for tx in 0..target.0 {
-            let (x0, x1) = (f64::from(tx) * sx, f64::from(tx + 1) * sx);
+            let (x0, x1) = (f64::from(tx) * sx, (f64::from(tx + 1) * sx).min(sw));
             // The target pixel's box exactly tiles the source, so the covered fractions of the
             // source pixels sum to one. Sum premultiplied colour × fraction over the box.
             let mut premultiplied = [0.0f64; 4];
