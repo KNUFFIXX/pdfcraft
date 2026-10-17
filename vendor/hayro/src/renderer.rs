@@ -892,12 +892,32 @@ impl Renderer {
         // pixels. It is shrunk once to exactly its snapped device rectangle and drawn 1:1 at the
         // snapped corner. Otherwise the shrunk raster (rounded up to a whole size) is sampled a
         // second time at a fractional scale and offset, which blurs scans and photos.
-        let snapped = if interpolate
+        let interpolated_minified = interpolate
             && requested_resize
             && !self.in_type3_glyph
-            && (new_width, new_height) != (source_width, source_height)
-        {
+            && (new_width, new_height) != (source_width, source_height);
+        // PdfCraft patch (#1700, follow-up to the averaging below): a shrunk 1-bit source, Type 3
+        // glyph masks included, is snapped the same way. Its averaged raster is otherwise drawn
+        // with `ImageQuality::Low` at a fractional scale, nearest-sampled a second time, and a
+        // whole averaged column or row (a one-pixel stroke) can fall between two pixel centres:
+        // an 18 px glyph averaged to 9 px and drawn 8.1 px wide lost its stems. Averaged straight
+        // into the device rectangle and drawn 1:1, every source pixel lands in some device pixel.
+        let one_bit_minified = !interpolate
+            && requested_resize
+            && (image_data.one_bit() || alpha_data.as_ref().is_some_and(|a| a.one_bit));
+        let snapped = if interpolated_minified {
             snap_minified_image(&cur_transform, (source_width, source_height), (new_width, new_height))
+        } else if one_bit_minified {
+            // A side shrunk by less than one pixel plans no resize (its size rounds up to the
+            // source's), and nearest sampling at the fractional scale dropped a column: 18 px
+            // drawn 17.1 px wide. That side keeps its source size and is drawn 1:1 at the snapped
+            // corner, at most one pixel wider than asked; averaging it into one pixel fewer would
+            // turn crisp strokes into pairs of grey pixels wherever the grids beat.
+            snap_minified_image(&cur_transform, (source_width, source_height), (new_width, new_height)).map(|(w, h, x0, y0)| {
+                let w = if new_width == source_width { source_width } else { w };
+                let h = if new_height == source_height { source_height } else { h };
+                (w, h, x0, y0)
+            })
         } else {
             None
         };
@@ -995,6 +1015,9 @@ impl Renderer {
             );
             return;
         }
+        // A snapped draw is placed 1:1, so it needs the raster at its snapped size. If resizing
+        // fell back to the source size, draw that raster scaled as before.
+        let snapped = snapped.filter(|_| (img_width, img_height) == (new_width, new_height));
         let mut additional_transform = Affine::scale_non_uniform(
             source_width as f64 / img_width as f64,
             source_height as f64 / img_height as f64,
@@ -1068,6 +1091,9 @@ impl Renderer {
             may_have_transparency,
         );
         let draw_transform = match snapped {
+            // A Type 3 glyph's raster carries the two-pixel transparent frame added above, so its
+            // snapped corner sits two device pixels in from the frame's.
+            Some((_, _, x0, y0)) if self.in_type3_glyph => Affine::translate((x0 - 2.0, y0 - 2.0)),
             Some((_, _, x0, y0)) => Affine::translate((x0, y0)),
             None => cur_transform * additional_transform,
         };
